@@ -4,6 +4,7 @@
 检索：语义向量 + 关键词(trigram) 混合，支持日期范围，逐字返回。
 """
 import hashlib
+import html
 import json
 import os
 import re
@@ -19,7 +20,7 @@ import numpy as np
 import uvicorn
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
-from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 SECRET = os.environ.get("SECRET_PATH", "").strip("/")
@@ -177,11 +178,14 @@ _SPLIT_RE = re.compile(r"(?<=[。！？!?；;\n])")
 def split_text(text: str, limit: int = CHUNK_CHARS) -> list[str]:
     """按段落、再按句子切成不超过 limit 字的小段。拼回去等于原文。"""
     text = text.strip("\n")
-    if len(text) <= limit:
+    if len(text) <= limit and not re.search(r"\n\s*【\d{4}[-./年]\d{1,2}", text):
         return [text] if text.strip() else []
     pieces: list[str] = []
     buf = ""
     for para in re.split(r"(?<=\n)", text):
+        if buf.strip() and re.match(r"\s*【\d{4}[-./年]\d{1,2}[-./月]\d{1,2}日?】", para):
+            pieces.append(buf)  # 日期标记行另起一段
+            buf = ""
         units = [para] if len(para) <= limit else _SPLIT_RE.split(para)
         for u in units:
             while len(u) > limit:  # 没有标点的超长串，硬切
@@ -666,15 +670,15 @@ def redate_saved(conv_id: str) -> None:
                 ).fetchone()
                 if own and own["created_at"] and own["created_at"].endswith("#"):
                     cur = own["created_at"][:-1]
-            marks = [_day_iso(*m.groups()) for m in _MARK_RE.finditer(r["text"])]
-            marks = [m for m in marks if m]
-            if marks:
-                cur = marks[0]
+            found = [(m.start(), _day_iso(*m.groups())) for m in _MARK_RE.finditer(r["text"])]
+            found = [(pos, d) for pos, d in found if d]
+            if found and (not cur or not r["text"][: found[0][0]].strip()):
+                cur = found[0][1]  # 标记在片段最开头（或之前还没有任何日期）
             if cur and r["created_at"] != cur:
                 c.execute("UPDATE chunks SET created_at=? WHERE id=?", (cur, r["id"]))
             first = first or cur or r["created_at"]
-            if len(marks) > 1:
-                cur = marks[-1]
+            if found:
+                cur = found[-1][1]
         if first and first != cv["created_at"]:
             c.execute("UPDATE conversations SET created_at=? WHERE id=?", (first, conv_id))
 
@@ -803,11 +807,84 @@ button{{padding:8px 20px;font-size:16px}}small{{color:#666}}</style>
 <b>语义检索：</b>{embed}<br><b>最近一次导入：</b>{status} <small>{at}</small></div>
 <div class="box"><b>上传 Claude 导出包</b><br>
 <small>在 Claude 网页版“设置 → 隐私 → 导出数据”，收到邮件后下载压缩包，原样传到这里。
-重复上传没关系，只会补上新的和有变化的对话。</small>
+上传后会列出里面所有的窗口，由你勾选要保存哪些；没勾的不会进原文库。
+导出包里是完整的原文，窗口被压缩过也不影响。重复上传没关系。</small>
 <form method="post" enctype="multipart/form-data" style="margin-top:12px">
 <input type="file" name="file" accept=".zip,.json" required>
 <button type="submit">上传并导入</button></form></div>
 <small>导入在后台进行，对话多的话第一次需要几十分钟。刷新本页可以看进度。</small></html>"""
+
+
+SELECT_PAGE = """<!doctype html><html lang="zh"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>选择要保存的窗口</title>
+<style>body{{font-family:system-ui,sans-serif;max-width:760px;margin:30px auto;padding:0 16px;line-height:1.6;color:#222}}
+label{{display:block;padding:6px 4px;border-bottom:1px solid #eee}}label:hover{{background:#f6f6f6}}
+small{{color:#777}}button{{padding:8px 20px;font-size:16px}}#q{{padding:6px;width:60%;font-size:15px}}
+.bar{{position:sticky;top:0;background:#fff;padding:10px 0;border-bottom:1px solid #ccc}}</style>
+<h2>选择要存进原文库的窗口</h2>
+<p>这个导出包里有 {total} 个窗口。只有打勾的会保存，其余的不会进原文库。
+<small>已经在库里的窗口已替你勾上，这样它们会更新到最新。</small></p>
+<form method="post" action="select"><input type="hidden" name="file" value="{file}">
+<div class="bar"><input id="q" placeholder="输入标题里的字来筛选…" oninput="flt()">
+<button type="button" onclick="all_(true)">全选</button> <button type="button" onclick="all_(false)">全不选</button>
+<button type="submit">保存选中的 <span id="n"></span></button></div>
+{rows}
+</form>
+<script>
+const L=[...document.querySelectorAll('label')];
+function cnt(){{document.getElementById('n').textContent='（'+L.filter(l=>l.firstElementChild.checked).length+'）';}}
+function flt(){{const q=document.getElementById('q').value.trim().toLowerCase();L.forEach(l=>l.style.display=l.textContent.toLowerCase().includes(q)?'':'none');}}
+function all_(v){{L.forEach(l=>{{if(l.style.display!=='none')l.firstElementChild.checked=v;}});cnt();}}
+document.addEventListener('change',cnt);cnt();
+</script></html>"""
+
+_FILE_RE = re.compile(r"^\d{8}-\d{6}\.(zip|json)$")
+
+
+def _select_page(fname: str, convs: list[dict]) -> str:
+    with db() as c:
+        have = {r["id"] for r in c.execute("SELECT id FROM conversations WHERE source='export'")}
+    items = []
+    for cv in convs:
+        cid = cv.get("uuid") or cv.get("id")
+        n = len(cv.get("chat_messages") or cv.get("messages") or [])
+        if not cid or not n:
+            continue
+        items.append((cv.get("updated_at") or cv.get("created_at") or "", cid, cv, n))
+    items.sort(key=lambda x: x[0], reverse=True)
+    rows = []
+    for _, cid, cv, n in items:
+        title = html.escape(cv.get("name") or cv.get("title") or "（无标题）")
+        rows.append(
+            f'<label><input type="checkbox" name="c" value="{html.escape(cid, quote=True)}"'
+            f'{" checked" if cid in have else ""}> {title} '
+            f'<small>{_to_local(cv.get("created_at") or "")[:10]} 开始 · {n} 条消息'
+            f'{" · 已在库里" if cid in have else ""}</small></label>'
+        )
+    return SELECT_PAGE.format(total=len(rows), file=fname, rows="\n".join(rows))
+
+
+@mcp.custom_route(f"/{SECRET}/select", methods=["POST"])
+async def select(request):
+    if ingest_status["running"]:
+        return HTMLResponse("上一次导入还没结束，请稍后再试。<a href='upload'>返回</a>", 409)
+    form = await request.form(max_fields=100000)
+    fname = str(form.get("file") or "")
+    path = os.path.join(DATA_DIR, "uploads", fname)
+    if not _FILE_RE.match(fname) or not os.path.exists(path):
+        return HTMLResponse("找不到刚才上传的文件，请重新上传。<a href='upload'>返回</a>", 400)
+    chosen = {str(v) for v in form.getlist("c")}
+    if not chosen:
+        return HTMLResponse("一个窗口都没有选。<a href='upload'>返回</a>", 400)
+    ingest_status.update(
+        running=True, message=f"已选 {len(chosen)} 个窗口，开始导入…", at=_now_local()
+    )
+
+    def loader():
+        return [c for c in _load_export(path) if (c.get("uuid") or c.get("id")) in chosen]
+
+    threading.Thread(target=_run_ingest, args=(loader, "export", "导入"), daemon=True).start()
+    return RedirectResponse("upload", status_code=303)
 
 
 @mcp.custom_route(f"/{SECRET}/upload", methods=["GET", "POST"])
@@ -824,6 +901,12 @@ async def upload(request):
         with open(path, "wb") as out:
             while chunk := await f.read(1 << 20):
                 out.write(chunk)
+        try:
+            convs = _load_export(path)
+        except Exception as e:  # noqa: BLE001
+            return HTMLResponse(f"这个文件读不了：{html.escape(str(e))}。<a href=''>返回</a>", 400)
+        if len(convs) > 1:  # 整个账号的导出包：先让用户勾选要保留哪些窗口
+            return HTMLResponse(_select_page(os.path.basename(path), convs))
         ingest_status.update(running=True, message="已收到文件，开始导入…", at=_now_local())
         threading.Thread(target=ingest_file, args=(path,), daemon=True).start()
     with db() as c:
