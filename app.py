@@ -20,6 +20,7 @@ import numpy as np
 import uvicorn
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
+from starlette.concurrency import run_in_threadpool
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
@@ -1162,6 +1163,9 @@ async def book_index(request):
             f'<b>{html.escape(cv["title"] or "（无标题）")}</b>'
             f'<span class="meta">{_cn_day(d[:10])} · {size}</span><span class="tag">{kind}</span></a>'
         )
+    n_trash = len(_trash_list())
+    body.append(f'<div class="end"><a href="/{SECRET}/trash" style="color:#a99">回收站'
+                f'{f"（{n_trash}）" if n_trash else ""}</a> · <a href="/{SECRET}/upload" style="color:#a99">上传导出包</a></div>')
     return _page("原文书架", "".join(body))
 
 
@@ -1244,7 +1248,8 @@ async def book_read(request):
         name = f'<div class="name">{html.escape(label)}</div>' if t["name"] else ""
         ks = " ".join(f"k{i}" for i in sorted(t["ks"]))
         body.append(f'<div class="turn {t["kind"]} {ks}">{anchors}{name}<div class="bubble">{inner}</div></div>')
-    body.append(f'<div class="end">— 到这里结束 —<br><a href="{base}">回到目录</a></div>')
+    body.append(f'<div class="end">— 到这里结束 —<br><a href="{base}">回到目录</a>'
+                f' · <a href="{base}/{html.escape(cid, quote=True)}/delete" style="color:#b98">删除这条记录</a></div>')
     body.append(
         "<script>(function(){var h=location.hash.slice(1);if(!h)return;var a=document.getElementById(h);"
         "if(!a)return;var ts=document.querySelectorAll('.k'+h.slice(1));"
@@ -1252,6 +1257,130 @@ async def book_read(request):
         "var f=a.parentNode.querySelector('.bubble');if(f)f.scrollIntoView({block:'start'});})();</script>"
     )
     return _page(cv["title"] or "原文", "".join(body))
+
+
+TRASH_DIR = os.path.join(DATA_DIR, "trash")
+os.makedirs(TRASH_DIR, exist_ok=True)
+_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,80}$")
+
+
+def trash_conversation(cid: str) -> bool:
+    """删除一条记录：先完整存一份到回收站，再从库里拿掉。"""
+    with _db_lock, db() as c:
+        cv = c.execute("SELECT * FROM conversations WHERE id=?", (cid,)).fetchone()
+        if not cv:
+            return False
+        msgs = c.execute("SELECT * FROM messages WHERE conv_id=? ORDER BY seq", (cid,)).fetchall()
+        dump = {"conversation": dict(cv), "messages": [dict(m) for m in msgs],
+                "deleted_at": _now_local()}
+        with open(os.path.join(TRASH_DIR, cid + ".json"), "w", encoding="utf-8") as f:
+            json.dump(dump, f, ensure_ascii=False)
+        ids = [r["id"] for r in c.execute("SELECT id FROM chunks WHERE conv_id=?", (cid,))]
+        c.executemany("DELETE FROM chunks_fts WHERE rowid=?", [(i,) for i in ids])
+        c.execute("DELETE FROM chunks WHERE conv_id=?", (cid,))
+        c.execute("DELETE FROM messages WHERE conv_id=?", (cid,))
+        c.execute("DELETE FROM conversations WHERE id=?", (cid,))
+    vindex.reload()
+    return True
+
+
+def restore_conversation(cid: str) -> bool:
+    path = os.path.join(TRASH_DIR, cid + ".json")
+    if not os.path.exists(path):
+        return False
+    with open(path, encoding="utf-8") as f:
+        d = json.load(f)
+    cv = d["conversation"]
+    with db() as c:
+        if c.execute("SELECT 1 FROM conversations WHERE id=?", (cid,)).fetchone():
+            return False  # 库里已经有同一条了，不覆盖
+    if cv["source"] == "saved":
+        with _db_lock, db() as c:
+            c.execute("INSERT INTO conversations VALUES(?,?,?,?,?,?,?)",
+                      (cid, cv["title"], cv["created_at"], cv["updated_at"], "saved", 0, ""))
+        for m in d["messages"]:
+            stamp = m["created_at"] or ""
+            append_message(cid, m["text"], stamp[:-1] if stamp.endswith("#") else "")
+        redate_saved(cid)
+    else:
+        store_conversation(
+            cid, cv["title"], cv["created_at"], cv["updated_at"], cv["source"],
+            [{"id": m["id"], "sender": m["sender"], "created_at": m["created_at"], "text": m["text"]}
+             for m in d["messages"]],
+        )
+    vindex.reload()
+    os.remove(path)
+    return True
+
+
+def _trash_list() -> list[dict]:
+    out = []
+    for p in sorted(os.listdir(TRASH_DIR)):
+        if p.endswith(".json"):
+            try:
+                with open(os.path.join(TRASH_DIR, p), encoding="utf-8") as f:
+                    d = json.load(f)
+                out.append({"id": p[:-5], "title": d["conversation"]["title"],
+                            "source": d["conversation"]["source"], "at": d.get("deleted_at", "")})
+            except Exception:  # noqa: BLE001
+                continue
+    return out
+
+
+BTN = ('style="padding:9px 22px;font-size:15px;border:0;border-radius:22px;cursor:pointer;'
+       'background:{bg};color:#fff"')
+
+
+@mcp.custom_route(f"/{SECRET}/book/{{conv_id}}/delete", methods=["GET", "POST"])
+async def book_delete(request):
+    base = f"/{SECRET}/book"
+    cid = request.path_params["conv_id"]
+    if not _ID_RE.match(cid):
+        return RedirectResponse(base, status_code=303)
+    if request.method == "POST":
+        await run_in_threadpool(trash_conversation, cid)
+        return RedirectResponse(base, status_code=303)
+    with db() as c:
+        cv = c.execute("SELECT * FROM conversations WHERE id=?", (cid,)).fetchone()
+    if not cv:
+        return RedirectResponse(base, status_code=303)
+    kind = "CC 存的" if cv["source"] == "saved" else "导出原文"
+    return _page("删除确认", (
+        f'<h1>要删除这条记录吗？</h1><a class="card" href="{base}/{html.escape(cid, quote=True)}">'
+        f'<b>{html.escape(cv["title"] or "（无标题）")}</b><span class="meta">'
+        f'{_cn_day(_to_local(cv["created_at"])[:10])}</span><span class="tag">{kind}</span></a>'
+        '<p class="meta" style="font-size:14px">删除后它会从书架和检索里消失，但会先放进回收站，随时可以恢复。</p>'
+        f'<form method="post" style="display:flex;gap:12px;align-items:center;margin-top:18px">'
+        f'<button {BTN.format(bg="#c0705e")}>删除</button><a href="{base}/{html.escape(cid, quote=True)}">不删了，返回</a></form>'
+    ))
+
+
+@mcp.custom_route(f"/{SECRET}/trash", methods=["GET", "POST"])
+async def trash_page(request):
+    base = f"/{SECRET}/book"
+    msg = ""
+    if request.method == "POST":
+        form = await request.form()
+        cid = str(form.get("id") or "")
+        if _ID_RE.match(cid):
+            ok = await run_in_threadpool(restore_conversation, cid)
+            msg = "已恢复到书架。" if ok else "没能恢复：书架上已经有同一条记录，或者回收站里找不到它。"
+    body = [f'<div class="top"><a class="back" href="{base}">‹</a><span class="t">回收站</span></div>',
+            '<h1>回收站</h1><div class="meta">删掉的记录都在这里，不会自动清空。</div>']
+    if msg:
+        body.append(f'<p>{msg}</p>')
+    items = _trash_list()
+    if not items:
+        body.append('<div class="end">回收站是空的。</div>')
+    for it in items:
+        kind = "CC 存的" if it["source"] == "saved" else "导出原文"
+        body.append(
+            f'<div class="card"><b>{html.escape(it["title"] or "（无标题）")}</b>'
+            f'<span class="meta">删除于 {html.escape(it["at"])}</span><span class="tag">{kind}</span>'
+            f'<form method="post" style="margin-top:8px"><input type="hidden" name="id" value="{html.escape(it["id"], quote=True)}">'
+            f'<button {BTN.format(bg="#7f9b72")}>恢复</button></form></div>'
+        )
+    return _page("回收站", "".join(body))
 
 
 @mcp.custom_route("/healthz", methods=["GET"])
