@@ -334,21 +334,64 @@ def store_conversation(
 ingest_status = {"running": False, "message": "还没有导入过", "at": ""}
 
 
+def _collect_convs(data, out: list[dict], depth: int = 0) -> None:
+    """从任意形状的 JSON 里把“像对话的东西”（有 ID、有消息列表）都找出来。"""
+    if isinstance(data, list):
+        for d in data:
+            _collect_convs(d, out, depth)
+    elif isinstance(data, dict):
+        msgs = data.get("chat_messages")
+        if msgs is None:
+            msgs = data.get("messages")
+        if (data.get("uuid") or data.get("id")) and isinstance(msgs, list):
+            out.append(data)
+        elif depth < 3:
+            for k in ("conversations", "chats", "data", "items"):
+                if k in data:
+                    _collect_convs(data[k], out, depth + 1)
+
+
+def _parse_json_text(raw: str, out: list[dict]) -> None:
+    try:
+        _collect_convs(json.loads(raw), out)
+        return
+    except ValueError:
+        pass
+    for line in raw.splitlines():  # 一行一个 JSON 的格式
+        line = line.strip()
+        if line:
+            try:
+                _collect_convs(json.loads(line), out)
+            except ValueError:
+                continue
+
+
 def _load_export(path: str) -> list[dict]:
+    """读取导出文件。压缩包里不管文件叫什么、分成几个，只要是对话都收进来。"""
+    out: list[dict] = []
     if zipfile.is_zipfile(path):
         with zipfile.ZipFile(path) as z:
-            names = [n for n in z.namelist() if n.endswith("conversations.json")]
+            names = [n for n in z.namelist() if n.lower().endswith((".json", ".jsonl"))]
             if not names:
-                raise ValueError("压缩包里没有找到 conversations.json")
-            data = json.loads(z.read(names[0]).decode("utf-8"))
+                raise ValueError("压缩包里没有找到 JSON 文件")
+            for n in names:
+                _parse_json_text(z.read(n).decode("utf-8", "replace"), out)
     else:
         with open(path, "rb") as f:
-            data = json.loads(f.read().decode("utf-8"))
-    if isinstance(data, dict):
-        data = [data] if data.get("chat_messages") is not None else data.get("conversations") or []
-    if not isinstance(data, list):
-        raise ValueError("文件格式不认识：不是对话列表")
-    return data
+            raw = f.read().decode("utf-8", "replace")
+        if '"export_url"' in raw[:4000] and '"data_files"' in raw[:4000]:
+            raise ValueError(
+                "这是导出的“下载清单”，不是聊天记录本身。请用浏览器打开清单里 conversations 那一项的链接，"
+                "下载得到 conversations-000.zip，再把那个压缩包传上来"
+            )
+        _parse_json_text(raw, out)
+    seen, uniq = set(), []
+    for c in out:
+        cid = c.get("uuid") or c.get("id")
+        if cid not in seen:
+            seen.add(cid)
+            uniq.append(c)
+    return uniq
 
 
 def _current_branch(cv: dict, raw: list[dict]) -> list[dict]:
