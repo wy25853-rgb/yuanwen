@@ -1005,19 +1005,41 @@ async def push(request):
     return JSONResponse({"title": title, "message": f"共 {n} 条消息，正在建立索引…"})
 
 
-BOOK_CSS = """body{font-family:"Noto Serif SC","Songti SC",Georgia,serif;max-width:720px;margin:0 auto;
-padding:24px 18px 80px;line-height:1.9;color:#2b2b2b;background:#faf8f3}
-a{color:#7a5c3e;text-decoration:none}a:hover{text-decoration:underline}
-h1{font-size:26px;margin:8px 0 4px}h2{font-size:17px;color:#8a7a66;border-bottom:1px solid #e3dccf;
-padding-bottom:4px;margin-top:32px}.meta{color:#998;font-size:13px}
-.item{padding:8px 0;border-bottom:1px dotted #e3dccf}.item a{font-size:17px}
-.msg{margin:18px 0;white-space:pre-wrap;word-break:break-word}
-.who{font-size:13px;color:#a08462;letter-spacing:1px;display:block;margin-bottom:2px}
-.me{background:#f1ece1;border-radius:8px;padding:10px 14px}
-.hit{background:#fff3c4}:target{background:#fff3c4}
-form.s{margin:14px 0}form.s input{padding:8px;font-size:15px;width:62%;border:1px solid #cdc3b2;border-radius:6px}
-form.s button{padding:8px 16px;font-size:15px}.nav{font-size:14px;margin-bottom:10px}
-.snip{font-size:15px;color:#555;display:block}"""
+BOOK_CSS = """*{box-sizing:border-box}
+body{margin:0;background:#f6f2e9;color:#33302b;font:16px/1.75 -apple-system,"PingFang SC","Microsoft YaHei","Noto Sans SC",system-ui,sans-serif}
+.wrap{max-width:700px;margin:0 auto;padding:0 16px 90px}
+a{color:#5d7a52;text-decoration:none}a:hover{text-decoration:underline}
+.top{position:sticky;top:0;z-index:5;background:rgba(246,242,233,.94);backdrop-filter:blur(6px);
+border-bottom:1px solid #e4dccb;padding:10px 16px;margin:0 -16px 8px;display:flex;gap:12px;align-items:center}
+.top .back{font-size:22px;line-height:1;padding:2px 8px;border-radius:8px}.top .back:hover{background:#e9e2d2;text-decoration:none}
+.top .t{font-weight:600;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+h1{font-size:24px;margin:26px 0 2px;letter-spacing:1px}
+.meta{color:#9a9384;font-size:13px}
+.month{font-size:14px;color:#8d8472;margin:30px 4px 10px;letter-spacing:2px}
+.card{display:block;background:#fffdf8;border:1px solid #e9e1d0;border-radius:14px;padding:13px 16px;margin:10px 0;
+color:inherit;transition:transform .12s,box-shadow .12s}
+.card:hover{text-decoration:none;transform:translateY(-1px);box-shadow:0 4px 14px rgba(90,70,40,.09)}
+.card b{font-weight:600;font-size:16.5px;display:block}
+.card .snip{display:block;color:#6d675b;font-size:14.5px;margin-top:4px;white-space:pre-wrap;
+overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical}
+.tag{display:inline-block;font-size:12px;border-radius:20px;padding:0 8px;margin-left:6px;background:#eef3e8;color:#6b8560}
+form.s{display:flex;gap:8px;margin:18px 0 6px}
+form.s input{flex:1;padding:11px 16px;font-size:15.5px;border:1px solid #d9d0bd;border-radius:24px;background:#fffdf8;outline:none}
+form.s input:focus{border-color:#9db38f}
+form.s button{padding:0 20px;font-size:15px;border:0;border-radius:24px;background:#7f9b72;color:#fff;cursor:pointer}
+.day{text-align:center;margin:30px 0 14px}.day span{display:inline-block;font-size:12.5px;color:#8d8472;
+background:#ebe4d5;border-radius:20px;padding:2px 14px;letter-spacing:1px}
+.turn{display:flex;flex-direction:column;margin:12px 0;align-items:flex-start}
+.turn.u{align-items:flex-end}
+.name{font-size:12px;color:#a39a88;margin:0 8px 3px}
+.bubble{max-width:86%;padding:10px 15px;border-radius:18px 18px 18px 5px;background:#fffdf8;border:1px solid #ebe3d2;
+white-space:pre-wrap;word-break:break-word;scroll-margin-top:70px}
+.turn.u .bubble{background:#e3edda;border-color:#d3e1c7;border-radius:18px 18px 5px 18px}
+.turn.n .bubble{max-width:100%;background:transparent;border:1px dashed #d9d0bd;color:#857d6d;font-size:14px;border-radius:12px}
+.aside{display:block;color:#8a836f;font-size:13.5px;font-style:normal;background:rgba(0,0,0,.035);border-radius:8px;padding:3px 9px;margin:4px 0}
+.bubble.hit{box-shadow:0 0 0 3px #f3d77a}
+.end{text-align:center;color:#b3aa97;font-size:13px;margin:40px 0 10px}
+@media(max-width:520px){body{font-size:15.5px}.bubble{max-width:92%}}"""
 
 
 def _page(title: str, body: str) -> HTMLResponse:
@@ -1025,7 +1047,8 @@ def _page(title: str, body: str) -> HTMLResponse:
         '<!doctype html><html lang="zh"><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         '<meta name="robots" content="noindex,nofollow">'
-        f"<title>{html.escape(title)}</title><style>{BOOK_CSS}</style>{body}</html>"
+        f"<title>{html.escape(title)}</title><style>{BOOK_CSS}</style>"
+        f'<div class="wrap">{body}</div></html>'
     )
 
 
@@ -1035,45 +1058,105 @@ SEARCH_FORM = (
 )
 
 
+def _cn_day(day: str) -> str:
+    try:
+        y, m, d = day.split("-")
+        return f"{int(y)}年{int(m)}月{int(d)}日"
+    except ValueError:
+        return day
+
+
 @mcp.custom_route(f"/{SECRET}/book", methods=["GET"])
 async def book_index(request):
     base = f"/{SECRET}/book"
     q = (request.query_params.get("q") or "").strip()
-    body = [f'<h1>原文书架</h1><div class="meta">只有你能看到这个页面，请不要把网址发给别人。</div>',
+    body = ['<h1>原文书架</h1><div class="meta">这里是只属于你的页面，网址不要发给别人。</div>',
             SEARCH_FORM.format(base=base, q=html.escape(q, quote=True))]
     if q:
         rows, note = search_chunks(q, "", "", 20)
         titles = _titles({r["conv_id"] for r in rows})
-        body.append(f'<h2>“{html.escape(q)}”找到 {len(rows)} 处</h2>')
+        body.append(f'<div class="month">“{html.escape(q)}” 找到 {len(rows)} 处</div>')
         if note:
             body.append(f'<div class="meta">{note}</div>')
         for r in rows:
-            snip = html.escape(r["text"].strip()[:140])
+            snip = html.escape(_MARK_RE.sub("", r["text"]).strip()[:160])
             body.append(
-                f'<div class="item"><a href="{base}/{html.escape(r["conv_id"], quote=True)}#c{r["id"]}">'
-                f'{html.escape(titles.get(r["conv_id"], ""))}</a> '
-                f'<span class="meta">{_to_local(r["created_at"])[:10]}</span>'
-                f'<span class="snip">{snip}…</span></div>'
+                f'<a class="card" href="{base}/{html.escape(r["conv_id"], quote=True)}#c{r["id"]}">'
+                f'<b>{html.escape(titles.get(r["conv_id"], ""))}</b>'
+                f'<span class="meta">{_cn_day(_to_local(r["created_at"])[:10])}</span>'
+                f'<span class="snip">{snip}</span></a>'
             )
-        body.append(f'<p><a href="{base}">← 回到目录</a></p>')
+        body.append(f'<div class="end"><a href="{base}">← 回到目录</a></div>')
         return _page("搜索：" + q, "".join(body))
     with db() as c:
         convs = c.execute("SELECT * FROM conversations ORDER BY created_at DESC").fetchall()
+        sizes = dict(c.execute("SELECT conv_id, SUM(LENGTH(text)) FROM chunks GROUP BY conv_id").fetchall())
     if not convs:
-        body.append("<p>书架还是空的。让 CC 存一段对话，或者去上传页面导入。</p>")
+        body.append('<div class="end">书架还是空的。让 CC 存一段对话，或者去上传页面导入。</div>')
     month = None
     for cv in convs:
         d = _to_local(cv["created_at"])
         if d[:7] != month:
             month = d[:7]
-            body.append(f"<h2>{month[:4]} 年 {int(month[5:7]) if month[5:7].isdigit() else month[5:7]} 月</h2>")
-        kind = "CC 存的" if cv["source"] == "saved" else "导出的原文"
+            mm = int(month[5:7]) if month[5:7].isdigit() else month[5:7]
+            body.append(f'<div class="month">{month[:4]} 年 {mm} 月</div>')
+        kind = "CC 存的" if cv["source"] == "saved" else "导出原文"
+        n = sizes.get(cv["id"]) or 0
+        size = f"{n / 10000:.1f} 万字" if n >= 10000 else f"{n} 字"
         body.append(
-            f'<div class="item"><a href="{base}/{html.escape(cv["id"], quote=True)}">'
-            f'{html.escape(cv["title"] or "（无标题）")}</a> '
-            f'<span class="meta">{d[:10]} · {kind}</span></div>'
+            f'<a class="card" href="{base}/{html.escape(cv["id"], quote=True)}">'
+            f'<b>{html.escape(cv["title"] or "（无标题）")}</b>'
+            f'<span class="meta">{_cn_day(d[:10])} · {size}</span><span class="tag">{kind}</span></a>'
         )
     return _page("原文书架", "".join(body))
+
+
+_ASIDE_RE = re.compile(r"^\s*\[(图片|搜索|附件|文件|语音|链接)[：:].*\]\s*$")
+
+
+def _build_turns(cv, chunks) -> list[dict]:
+    """把片段拼回一条条消息。CC 存的记录按行首的“贝贝：/CC：”拆开；导出的按消息拆开。"""
+    names = {USER_NAME: "u", AI_NAME: "a", "用户": "u", "Claude": "a"}
+    label_re = re.compile(
+        r"^\s*(" + "|".join(re.escape(n) for n in names) + r")\s*[：:][ \t]?(.*)$", re.S
+    )
+    turns: list[dict] = []
+
+    def start(kind, name, day, time=""):
+        turns.append({"kind": kind, "name": name, "day": day, "time": time, "lines": [], "ids": [], "ks": set()})
+
+    saved = cv["source"] == "saved"
+    last_msg = None
+    for r in chunks:
+        day = _to_local(r["created_at"])[:10]
+        if not saved:
+            if r["msg_id"] != last_msg:
+                last_msg = r["msg_id"]
+                kind = "u" if r["sender"] == "human" else "a"
+                start(kind, SENDER_NAMES.get(r["sender"], r["sender"]), day, _to_local(r["created_at"])[11:])
+            turns[-1]["ids"].append(r["id"])
+            turns[-1]["ks"].add(r["id"])
+            turns[-1]["lines"].append(r["text"])
+            continue
+        pending = [r["id"]]
+        for line in r["text"].split("\n"):
+            mk = _MARK_RE.fullmatch(line.strip())
+            if mk:
+                day = _to_local(_day_iso(*mk.groups()))[:10] or day
+                start("n", "", day)  # 日期标记只用来换天，不显示成文字
+                turns[-1]["skip"] = True
+                continue
+            m = label_re.match(line)
+            if m:
+                start(names[m.group(1)], USER_NAME if names[m.group(1)] == "u" else AI_NAME, day)
+                line = m.group(2)
+            elif not turns or turns[-1].get("skip"):
+                start("n", "", day)
+            turns[-1]["ids"] += pending
+            turns[-1]["ks"].add(r["id"])
+            pending = []
+            turns[-1]["lines"].append(line + "\n")
+    return [t for t in turns if not t.get("skip") and "".join(t["lines"]).strip()]
 
 
 @mcp.custom_route(f"/{SECRET}/book/{{conv_id}}", methods=["GET"])
@@ -1083,36 +1166,37 @@ async def book_read(request):
     with db() as c:
         cv = c.execute("SELECT * FROM conversations WHERE id=?", (cid,)).fetchone()
         if not cv:
-            return _page("没有找到", f'<p>没有找到这段对话。<a href="{base}">回到目录</a></p>')
-        chunks = c.execute(
-            "SELECT * FROM chunks WHERE conv_id=? ORDER BY seq", (cid,)
-        ).fetchall()
-    body = [f'<div class="nav"><a href="{base}">← 目录</a></div>',
-            f'<h1>{html.escape(cv["title"] or "（无标题）")}</h1>',
-            f'<div class="meta">开始于 {_to_local(cv["created_at"])}'
-            f'{" · 由 CC 在聊天中存入" if cv["source"] == "saved" else " · 来自官方导出"}</div>']
-    last_msg, last_day, buf = None, None, []
-
-    def flush():
-        if buf:
-            body.append("".join(buf) + "</div>")
-            buf.clear()
-
-    for r in chunks:
-        day = _to_local(r["created_at"])[:10]
-        if r["msg_id"] != last_msg or (cv["source"] == "saved" and day != last_day):
-            flush()
-            if day != last_day:
-                body.append(f"<h2>{day}</h2>")
-            who = "" if r["sender"] == "saved" else (
-                f'<span class="who">{html.escape(SENDER_NAMES.get(r["sender"], r["sender"]))} · '
-                f'{_to_local(r["created_at"])[11:]}</span>'
-            )
-            buf.append(f'<div class="msg{" me" if r["sender"] == "human" else ""}">{who}')
-            last_msg, last_day = r["msg_id"], day
-        buf.append(f'<span id="c{r["id"]}">{html.escape(r["text"])}</span>')
-    flush()
-    body.append(f'<p class="nav"><a href="{base}">← 回到目录</a></p>')
+            return _page("没有找到", f'<div class="end">没有找到这段对话。<a href="{base}">回到目录</a></div>')
+        chunks = c.execute("SELECT * FROM chunks WHERE conv_id=? ORDER BY seq", (cid,)).fetchall()
+    title = html.escape(cv["title"] or "（无标题）")
+    src = "由 CC 在聊天中存入" if cv["source"] == "saved" else "来自官方导出"
+    body = [f'<div class="top"><a class="back" href="{base}" title="回到目录">‹</a><span class="t">{title}</span></div>',
+            f'<h1>{title}</h1><div class="meta">{src}</div>']
+    last_day = None
+    for t in _build_turns(cv, chunks):
+        if t["day"] != last_day:
+            last_day = t["day"]
+            body.append(f'<div class="day"><span>{_cn_day(last_day)}</span></div>')
+        text = re.sub(r"\n{3,}", "\n\n", "".join(t["lines"])).strip("\n")
+        parts = []
+        for line in text.split("\n"):
+            if _ASIDE_RE.match(line):
+                parts.append(f'<span class="aside">{html.escape(line.strip())}</span>')
+            else:
+                parts.append(html.escape(line) + "\n")
+        inner = "".join(parts).rstrip("\n").replace('</span>\n', "</span>")
+        anchors = "".join(f'<a id="c{i}"></a>' for i in t["ids"])
+        label = t["name"] + (f" · {t['time']}" if t["time"] else "")
+        name = f'<div class="name">{html.escape(label)}</div>' if t["name"] else ""
+        ks = " ".join(f"k{i}" for i in sorted(t["ks"]))
+        body.append(f'<div class="turn {t["kind"]} {ks}">{anchors}{name}<div class="bubble">{inner}</div></div>')
+    body.append(f'<div class="end">— 到这里结束 —<br><a href="{base}">回到目录</a></div>')
+    body.append(
+        "<script>(function(){var h=location.hash.slice(1);if(!h)return;var a=document.getElementById(h);"
+        "if(!a)return;var ts=document.querySelectorAll('.k'+h.slice(1));"
+        "for(var i=0;i<ts.length;i++){var b=ts[i].querySelector('.bubble');if(b)b.classList.add('hit');}"
+        "var f=a.parentNode.querySelector('.bubble');if(f)f.scrollIntoView({block:'start'});})();</script>"
+    )
     return _page(cv["title"] or "原文", "".join(body))
 
 
