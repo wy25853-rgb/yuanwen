@@ -566,29 +566,21 @@ mcp = MCPServer(
 )
 
 
-@mcp.tool()
-def recall(query: str, date_from: str = "", date_to: str = "", max_results: int = 8) -> str:
-    """按意思和关键词在聊天原文里定向召回。逐字返回命中的原文片段，不做摘要或改写。
-
-    query：要找的内容，用自然语言描述即可（如“讨论那本关于记忆的书”）。
-    date_from / date_to：可选，本地日期 YYYY-MM-DD，含当天。用户说“上个月”“去年夏天”时先换算成日期范围。
-    max_results：返回片段数上限，默认 8，最大 20。
-    每个片段带 [片段 编号]，可传给 expand 看前后文；带对话ID，可传给 get_conversation。"""
-    max_results = max(1, min(int(max_results), 20))
-    lo, hi = _bound(date_from, False), _bound(date_to, True)
+def search_chunks(query: str, lo: str, hi: str, max_results: int):
+    """混合检索的核心：返回 (命中的片段行列表, 提示语)。"""
     note = ""
     vec_ids: list[int] = []
     if embedder and embedder.ok and len(vindex.ids):
         vec_ids = vindex.search(embedder.embed([query])[0], lo, hi, 40)
     else:
-        note = "（提示：语义检索当前不可用，本次只按关键词匹配）\n\n"
+        note = "（提示：语义检索当前不可用，本次只按关键词匹配）"
     kw_ids = _keyword_search(query, lo, hi, 40)
     scores: dict[int, float] = {}
     for lst in (vec_ids, kw_ids):
         for rank, cid in enumerate(lst):
             scores[cid] = scores.get(cid, 0.0) + 1.0 / (60 + rank)
     if not scores:
-        return note + "没有找到相关原文。可以换个说法，或放宽日期范围再试。"
+        return [], note
     ranked = sorted(scores, key=lambda i: -scores[i])
     with db() as c:
         q = ",".join("?" * len(ranked))
@@ -607,6 +599,22 @@ def recall(query: str, date_from: str = "", date_to: str = "", max_results: int 
         picked.append(r)
         if len(picked) >= max_results:
             break
+    return picked, note
+
+
+@mcp.tool()
+def recall(query: str, date_from: str = "", date_to: str = "", max_results: int = 8) -> str:
+    """按意思和关键词在聊天原文里定向召回。逐字返回命中的原文片段，不做摘要或改写。
+
+    query：要找的内容，用自然语言描述即可（如“讨论那本关于记忆的书”）。
+    date_from / date_to：可选，本地日期 YYYY-MM-DD，含当天。用户说“上个月”“去年夏天”时先换算成日期范围。
+    max_results：返回片段数上限，默认 8，最大 20。
+    每个片段带 [片段 编号]，可传给 expand 看前后文；带对话ID，可传给 get_conversation。"""
+    max_results = max(1, min(int(max_results), 20))
+    picked, note = search_chunks(query, _bound(date_from, False), _bound(date_to, True), max_results)
+    note = note + "\n\n" if note else ""
+    if not picked:
+        return note + "没有找到相关原文。可以换个说法，或放宽日期范围再试。"
     return note + _render(picked, _titles({r["conv_id"] for r in picked}))
 
 
@@ -850,6 +858,7 @@ PAGE = """<!doctype html><html lang="zh"><meta charset="utf-8">
 line-height:1.7;color:#222}}.box{{border:1px solid #ccc;border-radius:8px;padding:16px;margin:16px 0}}
 button{{padding:8px 20px;font-size:16px}}small{{color:#666}}</style>
 <h2>原文库</h2>
+<p><a href="book" style="font-size:18px">📖 打开原文书架，翻看存下来的对话</a></p>
 <div class="box"><b>现在库里有：</b>{convs} 段对话，{chunks} 个原文片段<br>
 <b>语义检索：</b>{embed}<br><b>最近一次导入：</b>{status} <small>{at}</small></div>
 <div class="box"><b>上传 Claude 导出包</b><br>
@@ -994,6 +1003,117 @@ async def push(request):
         target=_run_ingest, args=(lambda: convs, "window", "保存"), daemon=True
     ).start()
     return JSONResponse({"title": title, "message": f"共 {n} 条消息，正在建立索引…"})
+
+
+BOOK_CSS = """body{font-family:"Noto Serif SC","Songti SC",Georgia,serif;max-width:720px;margin:0 auto;
+padding:24px 18px 80px;line-height:1.9;color:#2b2b2b;background:#faf8f3}
+a{color:#7a5c3e;text-decoration:none}a:hover{text-decoration:underline}
+h1{font-size:26px;margin:8px 0 4px}h2{font-size:17px;color:#8a7a66;border-bottom:1px solid #e3dccf;
+padding-bottom:4px;margin-top:32px}.meta{color:#998;font-size:13px}
+.item{padding:8px 0;border-bottom:1px dotted #e3dccf}.item a{font-size:17px}
+.msg{margin:18px 0;white-space:pre-wrap;word-break:break-word}
+.who{font-size:13px;color:#a08462;letter-spacing:1px;display:block;margin-bottom:2px}
+.me{background:#f1ece1;border-radius:8px;padding:10px 14px}
+.hit{background:#fff3c4}:target{background:#fff3c4}
+form.s{margin:14px 0}form.s input{padding:8px;font-size:15px;width:62%;border:1px solid #cdc3b2;border-radius:6px}
+form.s button{padding:8px 16px;font-size:15px}.nav{font-size:14px;margin-bottom:10px}
+.snip{font-size:15px;color:#555;display:block}"""
+
+
+def _page(title: str, body: str) -> HTMLResponse:
+    return HTMLResponse(
+        '<!doctype html><html lang="zh"><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<meta name="robots" content="noindex,nofollow">'
+        f"<title>{html.escape(title)}</title><style>{BOOK_CSS}</style>{body}</html>"
+    )
+
+
+SEARCH_FORM = (
+    '<form class="s" method="get" action="{base}"><input name="q" value="{q}" '
+    'placeholder="按意思或关键词找原话，比如：桂花"> <button>搜索</button></form>'
+)
+
+
+@mcp.custom_route(f"/{SECRET}/book", methods=["GET"])
+async def book_index(request):
+    base = f"/{SECRET}/book"
+    q = (request.query_params.get("q") or "").strip()
+    body = [f'<h1>原文书架</h1><div class="meta">只有你能看到这个页面，请不要把网址发给别人。</div>',
+            SEARCH_FORM.format(base=base, q=html.escape(q, quote=True))]
+    if q:
+        rows, note = search_chunks(q, "", "", 20)
+        titles = _titles({r["conv_id"] for r in rows})
+        body.append(f'<h2>“{html.escape(q)}”找到 {len(rows)} 处</h2>')
+        if note:
+            body.append(f'<div class="meta">{note}</div>')
+        for r in rows:
+            snip = html.escape(r["text"].strip()[:140])
+            body.append(
+                f'<div class="item"><a href="{base}/{html.escape(r["conv_id"], quote=True)}#c{r["id"]}">'
+                f'{html.escape(titles.get(r["conv_id"], ""))}</a> '
+                f'<span class="meta">{_to_local(r["created_at"])[:10]}</span>'
+                f'<span class="snip">{snip}…</span></div>'
+            )
+        body.append(f'<p><a href="{base}">← 回到目录</a></p>')
+        return _page("搜索：" + q, "".join(body))
+    with db() as c:
+        convs = c.execute("SELECT * FROM conversations ORDER BY created_at DESC").fetchall()
+    if not convs:
+        body.append("<p>书架还是空的。让 CC 存一段对话，或者去上传页面导入。</p>")
+    month = None
+    for cv in convs:
+        d = _to_local(cv["created_at"])
+        if d[:7] != month:
+            month = d[:7]
+            body.append(f"<h2>{month[:4]} 年 {int(month[5:7]) if month[5:7].isdigit() else month[5:7]} 月</h2>")
+        kind = "CC 存的" if cv["source"] == "saved" else "导出的原文"
+        body.append(
+            f'<div class="item"><a href="{base}/{html.escape(cv["id"], quote=True)}">'
+            f'{html.escape(cv["title"] or "（无标题）")}</a> '
+            f'<span class="meta">{d[:10]} · {kind}</span></div>'
+        )
+    return _page("原文书架", "".join(body))
+
+
+@mcp.custom_route(f"/{SECRET}/book/{{conv_id}}", methods=["GET"])
+async def book_read(request):
+    base = f"/{SECRET}/book"
+    cid = request.path_params["conv_id"]
+    with db() as c:
+        cv = c.execute("SELECT * FROM conversations WHERE id=?", (cid,)).fetchone()
+        if not cv:
+            return _page("没有找到", f'<p>没有找到这段对话。<a href="{base}">回到目录</a></p>')
+        chunks = c.execute(
+            "SELECT * FROM chunks WHERE conv_id=? ORDER BY seq", (cid,)
+        ).fetchall()
+    body = [f'<div class="nav"><a href="{base}">← 目录</a></div>',
+            f'<h1>{html.escape(cv["title"] or "（无标题）")}</h1>',
+            f'<div class="meta">开始于 {_to_local(cv["created_at"])}'
+            f'{" · 由 CC 在聊天中存入" if cv["source"] == "saved" else " · 来自官方导出"}</div>']
+    last_msg, last_day, buf = None, None, []
+
+    def flush():
+        if buf:
+            body.append("".join(buf) + "</div>")
+            buf.clear()
+
+    for r in chunks:
+        day = _to_local(r["created_at"])[:10]
+        if r["msg_id"] != last_msg or (cv["source"] == "saved" and day != last_day):
+            flush()
+            if day != last_day:
+                body.append(f"<h2>{day}</h2>")
+            who = "" if r["sender"] == "saved" else (
+                f'<span class="who">{html.escape(SENDER_NAMES.get(r["sender"], r["sender"]))} · '
+                f'{_to_local(r["created_at"])[11:]}</span>'
+            )
+            buf.append(f'<div class="msg{" me" if r["sender"] == "human" else ""}">{who}')
+            last_msg, last_day = r["msg_id"], day
+        buf.append(f'<span id="c{r["id"]}">{html.escape(r["text"])}</span>')
+    flush()
+    body.append(f'<p class="nav"><a href="{base}">← 回到目录</a></p>')
+    return _page(cv["title"] or "原文", "".join(body))
 
 
 @mcp.custom_route("/healthz", methods=["GET"])

@@ -87,6 +87,7 @@ chmod +x /usr/local/bin/yuanwen-update
 cat > "$DIR/address.txt" <<TXT
 Claude 连接器地址： https://$DOMAIN/$SECRET/mcp
 上传导出包的页面： https://$DOMAIN/$SECRET/upload
+翻看原文的书架：   https://$DOMAIN/$SECRET/book
 TXT
 chmod 600 "$DIR/address.txt"
 
@@ -101,6 +102,6 @@ fi
 echo
 cat "$DIR/address.txt"
 echo
-echo "这两个地址相当于钥匙，不要发给别人。以后忘了，运行：cat $DIR/address.txt"
+echo "这几个地址相当于钥匙，不要发给别人。以后忘了，运行：cat $DIR/address.txt"
 echo "以后更新程序，只需运行：yuanwen-update"
 exit 0
