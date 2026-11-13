@@ -961,6 +961,17 @@ async def upload(request):
             convs = _load_export(path)
         except Exception as e:  # noqa: BLE001
             return HTMLResponse(f"这个文件读不了：{html.escape(str(e))}。<a href=''>返回</a>", 400)
+        usable = [
+            c for c in convs
+            if isinstance(c, dict) and (c.get("uuid") or c.get("id"))
+            and (c.get("chat_messages") or c.get("messages"))
+        ]
+        if not usable:
+            return HTMLResponse(
+                "<meta charset='utf-8'><body style='font-family:system-ui;max-width:600px;margin:60px auto;line-height:1.8'>"
+                "<h3>这个文件里没有找到对话</h3><p>可能是传错了文件。请上传导出邮件里下载的<b>整个压缩包（.zip，不要解压）</b>；"
+                "如果已经解压了，请上传里面名叫 <b>conversations.json</b> 的那个文件（通常是最大的一个）。</p>"
+                "<p><a href=''>返回重新上传</a></p></body>", 400)
         if len(convs) > 1:  # 整个账号的导出包：先让用户勾选要保留哪些窗口
             return HTMLResponse(_select_page(os.path.basename(path), convs))
         ingest_status.update(running=True, message="已收到文件，开始导入…", at=_now_local())
