@@ -29,6 +29,7 @@ LOCAL_TZ = ZoneInfo(os.environ.get("TZ_NAME", "Asia/Shanghai"))
 CHUNK_CHARS = int(os.environ.get("CHUNK_CHARS", "500"))
 MAX_RETURN_CHARS = int(os.environ.get("MAX_RETURN_CHARS", "12000"))
 PORT = int(os.environ.get("PORT", "8000"))
+FORCE_REPLACE = os.environ.get("FORCE_REPLACE", "0") == "1"  # 后门：确实要用更短的版本覆盖时才打开
 
 if not SECRET or len(SECRET) < 16:
     raise SystemExit("SECRET_PATH 未设置或太短（至少 16 位）")
@@ -170,6 +171,42 @@ class VectorIndex:
 vindex = VectorIndex()
 
 # --------------------------------------------------------------------------
+# 密钥打码：聊天里贴过的 API key / token 不原样入库（这是“逐字”的唯一例外）
+# --------------------------------------------------------------------------
+SCRUB = os.environ.get("SCRUB_SECRETS", "1") != "0"
+_SECRET_RE = re.compile(
+    r"sk-[A-Za-z0-9_\-]{20,}"
+    r"|sk_[0-9a-zA-Z]{32,}"
+    r"|gh[pousr]_[A-Za-z0-9]{20,}"
+    r"|github_pat_[A-Za-z0-9_]{20,}"
+    r"|AIza[0-9A-Za-z_\-]{30,}"
+    r"|xox[abprs]-[A-Za-z0-9\-]{10,}"
+    r"|(?<=Bearer )[A-Za-z0-9._\-]{24,}"
+)
+
+
+def scrub(text: str) -> str:
+    return _SECRET_RE.sub("[密钥已抹]", text) if SCRUB and text else text
+
+
+def scrub_existing() -> None:
+    """启动时把库里已有的密钥也抹掉。"""
+    if not SCRUB:
+        return
+    with _db_lock, db() as c:
+        for r in c.execute("SELECT id, text FROM messages").fetchall():
+            new = scrub(r["text"])
+            if new != r["text"]:
+                c.execute("UPDATE messages SET text=? WHERE id=?", (new, r["id"]))
+        for r in c.execute("SELECT id, text FROM chunks").fetchall():
+            new = scrub(r["text"])
+            if new != r["text"]:
+                c.execute("UPDATE chunks SET text=?, emb=NULL, emb_model=NULL WHERE id=?", (new, r["id"]))
+                c.execute("DELETE FROM chunks_fts WHERE rowid=?", (r["id"],))
+                c.execute("INSERT INTO chunks_fts(rowid, text) VALUES(?,?)", (r["id"], new))
+
+
+# --------------------------------------------------------------------------
 # 分段
 # --------------------------------------------------------------------------
 _SPLIT_RE = re.compile(r"(?<=[。！？!?；;\n])")
@@ -226,8 +263,9 @@ def store_conversation(
     conv_id: str, title: str, created: str, updated: str, source: str,
     messages: list[dict],
 ) -> str:
-    """写入一段对话。内容没变则跳过；变了则整段替换。返回 new/updated/skipped/empty。"""
-    msgs = [m for m in messages if m["text"]]
+    """写入一段对话。内容没变则跳过；变长或等长则整段替换；变短则保留旧的。
+    返回 new/updated/skipped/kept/empty。"""
+    msgs = [{**m, "text": scrub(m["text"])} for m in messages if m["text"]]
     if not msgs:
         return "empty"
     fp = hashlib.sha256(
@@ -239,6 +277,13 @@ def store_conversation(
         ).fetchone()
         if old and old["fingerprint"] == fp:
             return "skipped"
+        if old and not FORCE_REPLACE:
+            # 变短的不许覆盖：新版本比库里的还短，说明来源丢了内容，保留库里更完整的那份
+            old_len = c.execute(
+                "SELECT COALESCE(SUM(LENGTH(text)),0) FROM messages WHERE conv_id=?", (conv_id,)
+            ).fetchone()[0]
+            if sum(len(m["text"]) for m in msgs) < old_len:
+                return "kept"
 
     rows = []  # (msg_id, seq, sender, created_at, text)
     seq = 0
@@ -331,7 +376,7 @@ def _wait_embedder() -> None:
 
 def ingest_convs(convs: list[dict], source: str) -> dict:
     total = len(convs)
-    counts = {"new": 0, "updated": 0, "skipped": 0, "empty": 0}
+    counts = {"new": 0, "updated": 0, "skipped": 0, "kept": 0, "empty": 0}
     for i, cv in enumerate(convs, 1):
         cid = cv.get("uuid") or cv.get("id")
         if not cid:
@@ -366,6 +411,7 @@ def _run_ingest(loader, source: str, label: str) -> None:
         ingest_status["message"] = (
             f"{label}完成：新增 {c['new']} 段，更新 {c['updated']} 段，"
             f"没变化 {c['skipped']} 段，空对话 {c['empty']} 段"
+            + (f"；有 {c['kept']} 段新版本比库里的短，已保留库里更完整的那份" if c["kept"] else "")
         )
     except Exception as e:  # noqa: BLE001
         ingest_status["message"] = f"{label}失败：{type(e).__name__}: {e}"
@@ -711,6 +757,7 @@ def append_message(conv_id: str, text: str, day: str = "") -> int:
     """往一条已有的手动保存记录后面追加一段，只给新增部分建索引。返回追加后的总字数。"""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000Z")
     stamp = day + "#" if day else now  # 带 # 表示“这是指定的对话日期”
+    text = scrub(text)
     pieces = split_text(text)
     embs: list[bytes | None] = [None] * len(pieces)
     if embedder and embedder.ok and pieces:
@@ -958,6 +1005,7 @@ def _startup() -> None:
     global embedder
     try:
         relabel_saved()
+        scrub_existing()
         with db() as c:
             saved = [r["id"] for r in c.execute("SELECT id FROM conversations WHERE source='saved'")]
         for cid in saved:
