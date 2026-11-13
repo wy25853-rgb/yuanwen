@@ -1125,7 +1125,10 @@ def _cn_day(day: str) -> str:
 async def book_index(request):
     base = f"/{SECRET}/book"
     q = (request.query_params.get("q") or "").strip()
-    body = ['<h1>原文书架</h1><div class="meta">这里是只属于你的页面，网址不要发给别人。</div>',
+    body = [f'<div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px">'
+            f'<h1>原文书架</h1><a href="/{SECRET}/upload" style="font-size:14.5px;white-space:nowrap">'
+            f'原文库 · 上传导入 ›</a></div>'
+            '<div class="meta">这里是只属于你的页面，网址不要发给别人。</div>',
             SEARCH_FORM.format(base=base, q=html.escape(q, quote=True))]
     if q:
         rows, note = search_chunks(q, "", "", 20)
@@ -1165,7 +1168,7 @@ async def book_index(request):
         )
     n_trash = len(_trash_list())
     body.append(f'<div class="end"><a href="/{SECRET}/trash" style="color:#a99">回收站'
-                f'{f"（{n_trash}）" if n_trash else ""}</a> · <a href="/{SECRET}/upload" style="color:#a99">上传导出包</a></div>')
+                f'{f"（{n_trash}）" if n_trash else ""}</a> · <a href="/{SECRET}/upload" style="color:#a99">原文库</a></div>')
     return _page("原文书架", "".join(body))
 
 
