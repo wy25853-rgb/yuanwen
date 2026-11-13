@@ -333,6 +333,40 @@ def store_conversation(
 # 导入官方导出包
 # --------------------------------------------------------------------------
 ingest_status = {"running": False, "message": "还没有导入过", "at": ""}
+STATUS_FILE = os.path.join(DATA_DIR, "status.json")
+PENDING_FILE = os.path.join(DATA_DIR, "pending.json")
+try:
+    with open(STATUS_FILE, encoding="utf-8") as _f:
+        _saved = json.load(_f)
+    ingest_status.update(message=_saved.get("message", ""), at=_saved.get("at", ""))
+except Exception:  # noqa: BLE001
+    pass
+
+
+def _save_json(path: str, data) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def start_import(fname: str, chosen: list[str] | None, resumed: bool = False) -> None:
+    """开始（或续做）一次导入。任务先记到磁盘上，程序中途重启也能接着做完。"""
+    _save_json(PENDING_FILE, {"file": fname, "chosen": chosen})
+    path = os.path.join(DATA_DIR, "uploads", fname)
+    want = set(chosen) if chosen is not None else None
+
+    def loader():
+        convs = _load_export(path)
+        if want is None:
+            return convs
+        return [c for c in convs if (c.get("uuid") or c.get("id")) in want]
+
+    ingest_status.update(
+        running=True, at=_now_local(),
+        message="程序重启过，正在接着上次没完成的导入继续…" if resumed else "开始导入…",
+    )
+    threading.Thread(target=_run_ingest, args=(loader, "export", "导入"), daemon=True).start()
 
 
 def _collect_convs(data, out: list[dict], depth: int = 0) -> None:
@@ -461,10 +495,12 @@ def _run_ingest(loader, source: str, label: str) -> None:
         ingest_status["message"] = f"{label}失败：{type(e).__name__}: {e}"
     finally:
         ingest_status.update(running=False, at=_now_local())
-
-
-def ingest_file(path: str) -> None:
-    _run_ingest(lambda: _load_export(path), "export", "导入")
+        try:
+            _save_json(STATUS_FILE, {"message": ingest_status["message"], "at": ingest_status["at"]})
+            if os.path.exists(PENDING_FILE):
+                os.remove(PENDING_FILE)
+        except OSError:
+            pass
 
 
 def backfill_embeddings() -> None:
@@ -895,53 +931,41 @@ def save(content: str, title: str = "", window_id: str = "", date: str = "") -> 
 # --------------------------------------------------------------------------
 # 上传页面（给不用命令行的人用）
 # --------------------------------------------------------------------------
-PAGE = """<!doctype html><html lang="zh"><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>原文库</title>
-<style>body{{font-family:system-ui,sans-serif;max-width:640px;margin:40px auto;padding:0 16px;
-line-height:1.7;color:#222}}.box{{border:1px solid #ccc;border-radius:8px;padding:16px;margin:16px 0}}
-button{{padding:8px 20px;font-size:16px}}small{{color:#666}}</style>
-<h2>原文库</h2>
-<p><a href="book" style="font-size:18px">📖 打开原文书架，翻看存下来的对话</a></p>
-<div class="box"><b>现在库里有：</b>{convs} 段对话，{chunks} 个原文片段<br>
-<b>语义检索：</b>{embed}<br><b>最近一次导入：</b>{status} <small>{at}</small></div>
-<div class="box"><b>上传 Claude 导出包</b><br>
-<small>在 Claude 网页版“设置 → 隐私 → 导出数据”，收到邮件后下载压缩包，原样传到这里。
-上传后会列出里面所有的窗口，由你勾选要保存哪些；没勾的不会进原文库。
-导出包里是完整的原文，窗口被压缩过也不影响。重复上传没关系。</small>
-<form method="post" enctype="multipart/form-data" style="margin-top:12px">
-<input type="file" name="file" accept=".zip,.json" required>
-<button type="submit">上传并导入</button></form></div>
-<small>导入在后台进行，对话多的话第一次需要几十分钟。刷新本页可以看进度。</small></html>"""
-
-
-SELECT_PAGE = """<!doctype html><html lang="zh"><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>选择要保存的窗口</title>
-<style>body{{font-family:system-ui,sans-serif;max-width:760px;margin:30px auto;padding:0 16px;line-height:1.6;color:#222}}
-label{{display:block;padding:6px 4px;border-bottom:1px solid #eee}}label:hover{{background:#f6f6f6}}
-small{{color:#777}}button{{padding:8px 20px;font-size:16px}}#q{{padding:6px;width:60%;font-size:15px}}
-.bar{{position:sticky;top:0;background:#fff;padding:10px 0;border-bottom:1px solid #ccc}}</style>
-<h2>选择要存进原文库的窗口</h2>
-<p>这个导出包里有 {total} 个窗口。只有打勾的会保存，其余的不会进原文库。
-<small>已经在库里的窗口已替你勾上，这样它们会更新到最新。</small></p>
-<form method="post" action="select"><input type="hidden" name="file" value="{file}">
-<div class="bar"><input id="q" placeholder="输入标题里的字来筛选…" oninput="flt()">
-<button type="button" onclick="all_(true)">全选</button> <button type="button" onclick="all_(false)">全不选</button>
-<button type="submit">保存选中的 <span id="n"></span></button></div>
-{rows}
-</form>
-<script>
-const L=[...document.querySelectorAll('label')];
-function cnt(){{document.getElementById('n').textContent='（'+L.filter(l=>l.firstElementChild.checked).length+'）';}}
-function flt(){{const q=document.getElementById('q').value.trim().toLowerCase();L.forEach(l=>l.style.display=l.textContent.toLowerCase().includes(q)?'':'none');}}
-function all_(v){{L.forEach(l=>{{if(l.style.display!=='none')l.firstElementChild.checked=v;}});cnt();}}
-document.addEventListener('change',cnt);cnt();
-</script></html>"""
-
 _FILE_RE = re.compile(r"^\d{8}-\d{6}\.(zip|json)$")
 
 
-def _select_page(fname: str, convs: list[dict]) -> str:
+LIB_CSS = """.stat{display:flex;gap:10px;margin:16px 0}.stat div{flex:1;background:#fffdf8;border:1px solid #e9e1d0;
+border-radius:14px;padding:12px 14px;text-align:center}.stat b{display:block;font-size:22px;color:#5d7a52}
+.stat span{font-size:12.5px;color:#9a9384}
+.box{background:#fffdf8;border:1px solid #e9e1d0;border-radius:14px;padding:16px 18px;margin:14px 0}
+.box h3{margin:0 0 6px;font-size:16.5px}.box p{margin:6px 0;color:#6d675b;font-size:14.5px}
+.pill{display:inline-block;border:0;border-radius:24px;background:#7f9b72;color:#fff;font-size:15px;padding:9px 22px;cursor:pointer}
+.pill.ghost{background:#ebe4d5;color:#5d574b}.pill:disabled{opacity:.55;cursor:default}
+.file{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px}
+.file input[type=file]{flex:1;min-width:200px;font-size:14px;padding:8px;border:1px dashed #cfc5b0;border-radius:12px;background:#faf7f0}
+.live{background:#eef3e8;border-color:#d3e1c7}.warn{background:#fbf1e6;border-color:#eed9bd}
+.bar{position:sticky;top:0;z-index:5;background:rgba(246,242,233,.96);backdrop-filter:blur(6px);
+padding:12px 0;border-bottom:1px solid #e4dccb;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.bar input{flex:1;min-width:160px;padding:9px 14px;font-size:15px;border:1px solid #d9d0bd;border-radius:22px;background:#fffdf8;outline:none}
+label.row{display:flex;gap:12px;align-items:flex-start;background:#fffdf8;border:1px solid #e9e1d0;border-radius:12px;
+padding:11px 14px;margin:8px 0;cursor:pointer}label.row:hover{border-color:#b9cbab}
+label.row input{width:19px;height:19px;margin-top:4px;accent-color:#7f9b72;flex:none}
+label.row b{font-weight:600;display:block}label.row.on{background:#f1f6ec;border-color:#c5d6b8}"""
+
+
+def _lib_page(title: str, body: str, status: int = 200) -> HTMLResponse:
+    r = _page(title, f"<style>{LIB_CSS}</style>" + body)
+    r.status_code = status
+    return r
+
+
+def _notice(title: str, text: str, status: int = 400) -> HTMLResponse:
+    return _lib_page(title, (
+        f'<h1>{html.escape(title)}</h1><div class="box warn"><p style="color:#5d574b;font-size:15.5px">{text}</p></div>'
+        f'<a class="pill ghost" href="/{SECRET}/upload">返回原文库</a>'), status)
+
+
+def _select_page(fname: str, convs: list[dict]) -> HTMLResponse:
     with db() as c:
         have = {r["id"] for r in c.execute("SELECT id FROM conversations WHERE source='export'")}
     items = []
@@ -955,82 +979,117 @@ def _select_page(fname: str, convs: list[dict]) -> str:
     rows = []
     for _, cid, cv, n in items:
         title = html.escape(cv.get("name") or cv.get("title") or "（无标题）")
+        on = cid in have
         rows.append(
-            f'<label><input type="checkbox" name="c" value="{html.escape(cid, quote=True)}"'
-            f'{" checked" if cid in have else ""}> {title} '
-            f'<small>{_to_local(cv.get("created_at") or "")[:10]} 开始 · {n} 条消息'
-            f'{" · 已在库里" if cid in have else ""}</small></label>'
+            f'<label class="row{" on" if on else ""}"><input type="checkbox" name="c" '
+            f'value="{html.escape(cid, quote=True)}"{" checked" if on else ""}>'
+            f'<span><b>{title}</b><span class="meta">{_cn_day(_to_local(cv.get("created_at") or "")[:10])} 开始 · '
+            f'{n} 条消息</span>{"<span class=tag>已在库里</span>" if on else ""}</span></label>'
         )
-    return SELECT_PAGE.format(total=len(rows), file=fname, rows="\n".join(rows))
+    body = (
+        f'<h1>选择要存进原文库的窗口</h1><div class="meta" style="font-size:14px">这个导出包里有 {len(rows)} 个窗口。'
+        '只有打勾的会保存，其余的不会进原文库。已经在库里的已替你勾上，这样它们会更新到最新。</div>'
+        f'<form method="post" action="/{SECRET}/select" onsubmit="go.disabled=true;go.textContent=\'正在提交…\'">'
+        f'<input type="hidden" name="file" value="{html.escape(fname, quote=True)}">'
+        '<div class="bar"><input id="q" placeholder="输入标题里的字来筛选…" oninput="flt()">'
+        '<button type="button" class="pill ghost" onclick="all_(true)">全选</button>'
+        '<button type="button" class="pill ghost" onclick="all_(false)">全不选</button>'
+        '<button class="pill" name="go" id="go">保存选中的 <span id="n"></span></button></div>'
+        + "\n".join(rows) + "</form>"
+        "<script>const L=[...document.querySelectorAll('label.row')];"
+        "function cnt(){let k=0;L.forEach(l=>{const c=l.querySelector('input').checked;l.classList.toggle('on',c);if(c)k++;});"
+        "document.getElementById('n').textContent='（'+k+'）';}"
+        "function flt(){const q=document.getElementById('q').value.trim().toLowerCase();"
+        "L.forEach(l=>l.style.display=l.textContent.toLowerCase().includes(q)?'':'none');}"
+        "function all_(v){L.forEach(l=>{if(l.style.display!=='none')l.querySelector('input').checked=v;});cnt();}"
+        "document.addEventListener('change',cnt);cnt();</script>"
+    )
+    return _lib_page("选择要保存的窗口", body)
 
 
 @mcp.custom_route(f"/{SECRET}/select", methods=["POST"])
 async def select(request):
     if ingest_status["running"]:
-        return HTMLResponse("上一次导入还没结束，请稍后再试。<a href='upload'>返回</a>", 409)
+        return _notice("上一次导入还没结束", "请等它完成后再试。回到原文库页面可以看进度。", 409)
     form = await request.form(max_fields=100000)
     fname = str(form.get("file") or "")
     path = os.path.join(DATA_DIR, "uploads", fname)
     if not _FILE_RE.match(fname) or not os.path.exists(path):
-        return HTMLResponse("找不到刚才上传的文件，请重新上传。<a href='upload'>返回</a>", 400)
+        return _notice("找不到刚才上传的文件", "请回到原文库页面重新上传一次。")
     chosen = {str(v) for v in form.getlist("c")}
     if not chosen:
-        return HTMLResponse("一个窗口都没有选。<a href='upload'>返回</a>", 400)
-    ingest_status.update(
-        running=True, message=f"已选 {len(chosen)} 个窗口，开始导入…", at=_now_local()
-    )
-
-    def loader():
-        return [c for c in _load_export(path) if (c.get("uuid") or c.get("id")) in chosen]
-
-    threading.Thread(target=_run_ingest, args=(loader, "export", "导入"), daemon=True).start()
-    return RedirectResponse("upload", status_code=303)
+        return _notice("一个窗口都没有选", "请回到上一页，至少勾选一个窗口。")
+    start_import(fname, sorted(chosen))
+    return RedirectResponse(f"/{SECRET}/upload", status_code=303)
 
 
 @mcp.custom_route(f"/{SECRET}/upload", methods=["GET", "POST"])
 async def upload(request):
     if request.method == "POST":
         if ingest_status["running"]:
-            return HTMLResponse("上一次导入还没结束，请稍后再传。<a href=''>返回</a>", 409)
+            return _notice("上一次导入还没结束", "请等它完成后再上传。回到原文库页面可以看进度。", 409)
         form = await request.form()
         f = form.get("file")
         if f is None or not getattr(f, "filename", ""):
-            return HTMLResponse("没有收到文件。<a href=''>返回</a>", 400)
+            return _notice("没有收到文件", "请回到原文库页面，先选择文件再点上传。")
         ext = ".zip" if f.filename.lower().endswith(".zip") else ".json"
-        path = os.path.join(DATA_DIR, "uploads", time.strftime("%Y%m%d-%H%M%S") + ext)
+        fname = time.strftime("%Y%m%d-%H%M%S") + ext
+        path = os.path.join(DATA_DIR, "uploads", fname)
         with open(path, "wb") as out:
             while chunk := await f.read(1 << 20):
                 out.write(chunk)
         try:
-            convs = _load_export(path)
+            convs = await run_in_threadpool(_load_export, path)
         except Exception as e:  # noqa: BLE001
-            return HTMLResponse(f"这个文件读不了：{html.escape(str(e))}。<a href=''>返回</a>", 400)
+            return _notice("这个文件读不了", html.escape(str(e)) + "。")
         usable = [
             c for c in convs
             if isinstance(c, dict) and (c.get("uuid") or c.get("id"))
             and (c.get("chat_messages") or c.get("messages"))
         ]
         if not usable:
-            return HTMLResponse(
-                "<meta charset='utf-8'><body style='font-family:system-ui;max-width:600px;margin:60px auto;line-height:1.8'>"
-                "<h3>这个文件里没有找到对话</h3><p>可能是传错了文件。请上传导出邮件里下载的<b>整个压缩包（.zip，不要解压）</b>；"
-                "如果已经解压了，请上传里面名叫 <b>conversations.json</b> 的那个文件（通常是最大的一个）。</p>"
-                "<p><a href=''>返回重新上传</a></p></body>", 400)
+            return _notice("这个文件里没有找到对话", (
+                "可能是传错了文件。请上传 <b>conversations-000.zip</b> 这样的聊天记录压缩包（不要解压）。"
+                "如果导出时拿到的是一个很小的清单文件，请打开清单里 conversations 那一项的链接，下载到的压缩包才是聊天记录。"))
         if len(convs) > 1:  # 整个账号的导出包：先让用户勾选要保留哪些窗口
-            return HTMLResponse(_select_page(os.path.basename(path), convs))
-        ingest_status.update(running=True, message="已收到文件，开始导入…", at=_now_local())
-        threading.Thread(target=ingest_file, args=(path,), daemon=True).start()
+            return _select_page(fname, convs)
+        start_import(fname, None)
+        return RedirectResponse(f"/{SECRET}/upload", status_code=303)
     with db() as c:
         convs = c.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
-        chunks = c.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        chars = c.execute("SELECT COALESCE(SUM(LENGTH(text)),0) FROM chunks").fetchone()[0]
     if embedder and embedder.ok:
-        embed = "正常"
+        embed, embed_cls = "正常", ""
     else:
-        embed = "不可用，只能按关键词搜（" + (embedder.error if embedder else "模型加载中") + "）"
-    return HTMLResponse(
-        PAGE.format(convs=convs, chunks=chunks, embed=embed,
-                    status=ingest_status["message"], at=ingest_status["at"])
+        embed = "不可用（" + html.escape(embedder.error if embedder else "模型加载中，稍等几分钟") + "），暂时只能按关键词找"
+        embed_cls = " warn"
+    size = f"{chars / 10000:.1f} 万" if chars >= 10000 else str(chars)
+    running = ingest_status["running"]
+    body = (
+        f'<div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px"><h1>原文库</h1>'
+        f'<a href="/{SECRET}/book" style="font-size:14.5px;white-space:nowrap">原文书架 · 翻看原文 ›</a></div>'
+        '<div class="meta">这里是只属于你的页面，网址不要发给别人。</div>'
+        f'<div class="stat"><div><b>{convs}</b><span>段对话</span></div><div><b>{size}</b><span>字原文</span></div></div>'
+        f'<div class="box{embed_cls}"><h3>按意思查找</h3><p>{embed}</p></div>'
+        f'<div class="box{" live" if running else ""}" id="st"><h3>{"正在导入" if running else "最近一次导入"}</h3>'
+        f'<p id="sm" style="color:#4d4a42;font-size:15px">{html.escape(ingest_status["message"])}</p>'
+        f'<p class="meta" id="sa">{html.escape(ingest_status["at"])}</p>'
+        + ('<p class="meta">导入过程中请不要更新程序（yuanwen-update），这一页会自动刷新进度。</p>' if running else "")
+        + '</div>'
+        '<div class="box"><h3>上传 Claude 导出的聊天记录</h3>'
+        '<p>在 Claude 网页版“设置 → 隐私 → 导出数据”申请导出，下载其中的聊天记录压缩包（conversations-000.zip），原样传到这里，不用解压。</p>'
+        '<p>上传后会列出里面所有的窗口，由你勾选要保存哪些，没勾的不会进原文库。窗口被压缩过也不影响，导出的是完整原文。</p>'
+        '<form method="post" enctype="multipart/form-data" class="file" '
+        'onsubmit="ub.disabled=true;ub.textContent=\'正在上传，请不要关闭页面…\'">'
+        '<input type="file" name="file" accept=".zip,.json" required>'
+        f'<button class="pill" id="ub" name="ub"{" disabled" if running else ""}>上传</button></form></div>'
+        f'<div class="end"><a href="/{SECRET}/trash" style="color:#a99">回收站</a></div>'
+        "<script>(function(){var was=" + ("true" if running else "false") + ";function tick(){fetch('status').then(r=>r.json()).then(s=>{"
+        "document.getElementById('sm').textContent=s.message;document.getElementById('sa').textContent=s.at;"
+        "if(was&&!s.running){location.reload();return;}if(s.running){was=true;setTimeout(tick,3000);}}).catch(()=>setTimeout(tick,5000));}"
+        "if(was)setTimeout(tick,3000);})();</script>"
     )
+    return _lib_page("原文库", body)
 
 
 @mcp.custom_route(f"/{SECRET}/status", methods=["GET"])
@@ -1231,7 +1290,8 @@ async def book_read(request):
         chunks = c.execute("SELECT * FROM chunks WHERE conv_id=? ORDER BY seq", (cid,)).fetchall()
     title = html.escape(cv["title"] or "（无标题）")
     src = "由 CC 在聊天中存入" if cv["source"] == "saved" else "来自官方导出"
-    body = [f'<div class="top"><a class="back" href="{base}" title="回到目录">‹</a><span class="t">{title}</span></div>',
+    body = [f'<div class="top"><a class="back" href="{base}" title="回到目录">‹</a><span class="t" style="flex:1">{title}</span>'
+            f'<a href="{base}/{html.escape(cid, quote=True)}/delete" style="font-size:13.5px;color:#b98;white-space:nowrap">删除</a></div>',
             f'<h1>{title}</h1><div class="meta">{src}</div>']
     last_day = None
     for t in _build_turns(cv, chunks):
@@ -1405,6 +1465,16 @@ def _startup() -> None:
     embedder = Embedder()
     vindex.reload()
     backfill_embeddings()
+    try:
+        if os.path.exists(PENDING_FILE) and not ingest_status["running"]:
+            with open(PENDING_FILE, encoding="utf-8") as f:
+                job = json.load(f)
+            if _FILE_RE.match(job.get("file", "")) and os.path.exists(os.path.join(DATA_DIR, "uploads", job["file"])):
+                start_import(job["file"], job.get("chosen"), resumed=True)
+            else:
+                os.remove(PENDING_FILE)
+    except Exception as e:  # noqa: BLE001
+        print("续做导入时出错：", e, flush=True)
 
 
 if __name__ == "__main__":
